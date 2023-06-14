@@ -62,7 +62,7 @@ class MetalProgram:
       os.system(f"cd {pathlib.Path(__file__).parent.parent.parent}/disassemblers/applegpu && python3 compiler_explorer.py /tmp/shader.bin")
     self.pipeline_state = unwrap(METAL.device.newComputePipelineStateWithFunction_error_(self.fxn, None))
 
-  def __call__(self, global_size, local_size, *bufs, wait=False) -> Union[Optional[Any], None]:
+  def __call__(self, global_size, local_size, *bufs, wait=False) -> Optional[Any]:
     global_size += [1] * (3-len(global_size))
     if local_size is None: local_size = [32]
     local_size += [1] * (3-len(local_size))
@@ -77,7 +77,6 @@ class MetalProgram:
     command_buffer.commit()
     if not wait:
       METAL.mtl_buffers_in_flight.append(command_buffer)
-      return None
     command_buffer.waitUntilCompleted()
     return command_buffer.GPUEndTime() - command_buffer.GPUStartTime()
 
