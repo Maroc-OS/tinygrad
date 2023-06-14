@@ -114,6 +114,22 @@ jobs:
     - name: Run ONNX
       run: TORCH=1 python -m pytest test/external/external_test_onnx_backend.py --tb=no --disable-warnings || true
 
+  testmetal:
+    name: Metal Tests
+    runs-on: macos-13
+   
+    steps:
+    - name: Checkout Code
+      uses: actions/checkout@v3
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v4
+      with:
+        python-version: 3.11
+    - name: Install Dependencies
+      run: pip install -e '.[metal,testing]'
+    - name: Run Pytest
+      run: METAL=1 python -m pytest -s -v -n=auto test/
+
   testgpu:
     name: GPU Tests
     runs-on: ubuntu-20.04
