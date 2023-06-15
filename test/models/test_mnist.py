@@ -27,7 +27,7 @@ class TinyConvNet:
     # https://keras.io/examples/vision/mnist_convnet/
     conv = 3
     #inter_chan, out_chan = 32, 64
-    inter_chan, out_chan = 8, 16   # for speed
+    inter_chan, out_chan = 4, 8   # for speed
     self.c1 = Tensor.scaled_uniform(inter_chan,1,conv,conv)
     self.c2 = Tensor.scaled_uniform(out_chan,inter_chan,conv,conv)
     self.l1 = Tensor.scaled_uniform(out_chan*5*5, 10)
