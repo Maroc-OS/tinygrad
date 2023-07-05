@@ -1,5 +1,5 @@
 import math
-from typing import Optional, Union, Tuple, List
+from typing import Optional, Union, Tuple
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import prod
 
