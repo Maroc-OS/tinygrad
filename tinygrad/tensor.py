@@ -598,7 +598,7 @@ class Tensor:
 
   # ***** functional nn ops *****
 
-  def linear(self, weight:Tensor, bias:Optional[Tensor]=None):
+  def linear(self, weight:Tensor, bias:Optional[Tensor]=None) -> Tensor:
     x = self.mul(weight) if len(weight.shape) == 1 else self.dot(weight)
     return x.add(bias) if bias is not None else x
 
