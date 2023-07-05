@@ -14,8 +14,6 @@ class BatchNorm2d:
     self.num_batches_tracked: Tensor = Tensor.zeros(1, requires_grad=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    batch_mean: Tensor
-    batch_invstd: Tensor
     if Tensor.training:
       # This requires two full memory accesses to x
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
