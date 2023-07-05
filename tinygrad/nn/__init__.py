@@ -14,8 +14,6 @@ class BatchNorm2d:
     self.num_batches_tracked: Tensor = Tensor.zeros(1, requires_grad=False)
 
   def __call__(self, x:Tensor) -> Tensor:
-    batch_mean: Tensor
-    batch_invstd: Tensor
     if Tensor.training:
       # This requires two full memory accesses to x
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
@@ -71,7 +69,7 @@ class Linear:
   def __init__(self, in_features, out_features, bias=True) -> None:
     self.in_features: int = in_features
     self.out_features: int = out_features
-    self.weight: Tensor = Tensor.kaiming_uniform(out_features, in_features, a=math.sqrt(5))
+    self.weight: Tensor = Tensor.kaiming_uniform(self.out_features, self.in_features, a=math.sqrt(5))
     self.bound: float = 1 / math.sqrt(self.weight.shape[1])
     self.bias: Union[Tensor, None] = Tensor.uniform(out_features, low=-self.bound, high=self.bound) if bias else None
 
