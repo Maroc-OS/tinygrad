@@ -14,6 +14,8 @@ class BatchNorm2d:
     self.num_batches_tracked: Tensor = Tensor.zeros(1, requires_grad=False)
 
   def __call__(self, x:Tensor) -> Tensor:
+    batch_mean: Tensor
+    batch_invstd: Tensor
     if Tensor.training:
       # This requires two full memory accesses to x
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
@@ -38,10 +40,7 @@ class BatchNorm2d:
 class Conv:
   def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True) -> None:
     self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
-    self.stride: int = stride
-    self.padding: int = padding
-    self.dilation: int = dilation
-    self.groups: int = groups
+    self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
 
     self.weight: Tensor = Tensor.kaiming_uniform(out_channels, in_channels // groups, *self.kernel_size, a=math.sqrt(5))
     self.bound: float = 1 / math.sqrt(prod(self.weight.shape[1:]))
@@ -71,7 +70,7 @@ class Linear:
     self.out_features: int = out_features
     self.weight: Tensor = Tensor.kaiming_uniform(self.out_features, self.in_features, a=math.sqrt(5))
     self.bound: float = 1 / math.sqrt(self.weight.shape[1])
-    self.bias: Union[Tensor, None] = Tensor.uniform(out_features, low=-self.bound, high=self.bound) if bias else None
+    self.bias: Union[Tensor, None] = Tensor.uniform(self.out_features, low=-self.bound, high=self.bound) if bias else None
 
   def __call__(self, x:Tensor) -> Tensor:
     return x.linear(self.weight.transpose(), self.bias)
