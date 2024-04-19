@@ -10,7 +10,7 @@ You can either pass in the URL of a picture to discover what it is:
 
 ```sh
 python3 examples/efficientnet.py ./test/models/efficientnet/Chicken.jpg
-````
+```
 
 Or, if you have a camera and OpenCV installed, you can detect what is in front of you:
 
