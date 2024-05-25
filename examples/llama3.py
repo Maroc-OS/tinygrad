@@ -187,139 +187,138 @@ def prefill(model, toks, start_pos=0):
   return start_pos
 
 if __name__ == "__main__":
-  Tensor.no_grad = True
+  with Tensor.no_grad():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model", type=Path, required=True)
+    parser.add_argument("--size", choices=["8B", "70B"], default="8B")
+    parser.add_argument("--shard", type=int, default=1)
+    parser.add_argument("--quantize", choices=["int8", "nf4"])
+    parser.add_argument("--api", action="store_true")
+    parser.add_argument('--seed', type=int)
+    args = parser.parse_args()
 
-  parser = argparse.ArgumentParser()
-  parser.add_argument("--model", type=Path, required=True)
-  parser.add_argument("--size", choices=["8B", "70B"], default="8B")
-  parser.add_argument("--shard", type=int, default=1)
-  parser.add_argument("--quantize", choices=["int8", "nf4"])
-  parser.add_argument("--api", action="store_true")
-  parser.add_argument('--seed', type=int)
-  args = parser.parse_args()
+    if args.seed is not None: Tensor.manual_seed(args.seed)
+    print(f"seed = {Tensor._seed}")
 
-  if args.seed is not None: Tensor.manual_seed(args.seed)
-  print(f"seed = {Tensor._seed}")
+    tokenizer = Tokenizer(str((args.model if args.model.is_dir() else args.model.parent) / "tokenizer.model"))
+    def encode_role(role: str):
+      return [tokenizer.special_tokens["<|start_header_id|>"]] + tokenizer.encode(role) + [tokenizer.special_tokens["<|end_header_id|>"]] + tokenizer.encode("\n\n")
+    def encode_message(role: str, content: str):
+      return encode_role(role) + tokenizer.encode(content.strip()) + [tokenizer.special_tokens["<|eot_id|>"]]
 
-  tokenizer = Tokenizer(str((args.model if args.model.is_dir() else args.model.parent) / "tokenizer.model"))
-  def encode_role(role: str):
-    return [tokenizer.special_tokens["<|start_header_id|>"]] + tokenizer.encode(role) + [tokenizer.special_tokens["<|end_header_id|>"]] + tokenizer.encode("\n\n")
-  def encode_message(role: str, content: str):
-    return encode_role(role) + tokenizer.encode(content.strip()) + [tokenizer.special_tokens["<|eot_id|>"]]
+    device = tuple(f"{Device.DEFAULT}:{i}" for i in range(args.shard)) if args.shard > 1 else Device.DEFAULT
+    model = build_transformer(args.model, model_size=args.size, quantize=args.quantize, device=device)
 
-  device = tuple(f"{Device.DEFAULT}:{i}" for i in range(args.shard)) if args.shard > 1 else Device.DEFAULT
-  model = build_transformer(args.model, model_size=args.size, quantize=args.quantize, device=device)
+    if args.api:
+      from bottle import Bottle, request, response, HTTPResponse, abort
+      app = Bottle()
 
-  if args.api:
-    from bottle import Bottle, request, response, HTTPResponse, abort
-    app = Bottle()
+      cors_headers = {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Allow-Headers": "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token, Authorization",
+        "Access-Control-Allow-Credentials": "true",
+      }
+      @app.hook("before_request")
+      def handle_options():
+        if request.method == "OPTIONS": raise HTTPResponse(headers=cors_headers)
+      @app.hook("after_request")
+      def enable_cors():
+        for key, value in cors_headers.items(): response.set_header(key, value)
 
-    cors_headers = {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-      "Access-Control-Allow-Headers": "Origin, Accept, Content-Type, X-Requested-With, X-CSRF-Token, Authorization",
-      "Access-Control-Allow-Credentials": "true",
-    }
-    @app.hook("before_request")
-    def handle_options():
-      if request.method == "OPTIONS": raise HTTPResponse(headers=cors_headers)
-    @app.hook("after_request")
-    def enable_cors():
-      for key, value in cors_headers.items(): response.set_header(key, value)
+      @app.get("/v1/models")
+      def models():
+        return json.dumps([str(args.model)])
 
-    @app.get("/v1/models")
-    def models():
-      return json.dumps([str(args.model)])
+      @app.post("/v1/internal/token-count")
+      def token_count():
+        rjson = json.loads(request.body.read())
+        return json.dumps(len(tokenizer.encode(rjson.get("text", ""))))
+      @app.post("/v1/token/encode")
+      def token_encode():
+        rjson = json.loads(request.body.read())
+        return json.dumps(tokenizer.encode(rjson.get("text", "")))
 
-    @app.post("/v1/internal/token-count")
-    def token_count():
-      rjson = json.loads(request.body.read())
-      return json.dumps(len(tokenizer.encode(rjson.get("text", ""))))
-    @app.post("/v1/token/encode")
-    def token_encode():
-      rjson = json.loads(request.body.read())
-      return json.dumps(tokenizer.encode(rjson.get("text", "")))
+      @app.post("/v1/completions")
+      def completions():
+        rjson = json.loads(request.body.read())
 
-    @app.post("/v1/completions")
-    def completions():
-      rjson = json.loads(request.body.read())
+        # check if we are streaming
+        if rjson.get("stream", False):
+          response.content_type = "text/event-stream"
+          response.set_header("Cache-Control", "no-cache")
+        else: abort(400, "streaming required")
 
-      # check if we are streaming
-      if rjson.get("stream", False):
-        response.content_type = "text/event-stream"
-        response.set_header("Cache-Control", "no-cache")
-      else: abort(400, "streaming required")
+        toks = [tokenizer.bos_id] + tokenizer.encode(rjson.get("prompt", ""), allow_special=True)
 
-      toks = [tokenizer.bos_id] + tokenizer.encode(rjson.get("prompt", ""), allow_special=True)
+        start_pos = prefill(model, toks)
+        last_tok = toks[-1]
+        while True:
+          GlobalCounters.reset()
+          tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
+          start_pos += 1
+          last_tok = tok
+          if tok in tokenizer.stop_tokens: break
 
-      start_pos = prefill(model, toks)
-      last_tok = toks[-1]
+          res = {
+            "choices": [{
+              "text": tokenizer.decode([tok]),
+            }]
+          }
+          yield f"data: {json.dumps(res)}\n\n"
+
+      @app.post("/v1/chat/completions")
+      def chat_completions():
+        rjson = json.loads(request.body.read())
+        if "messages" not in rjson: abort(400, "messages required")
+
+        # check if we are streaming
+        if rjson.get("stream", False):
+          response.content_type = "text/event-stream"
+          response.set_header("Cache-Control", "no-cache")
+        else: abort(400, "streaming required")
+
+        toks = [tokenizer.bos_id]
+        for message in rjson["messages"]:
+          toks += encode_message(message["role"], message["content"])
+        # ensure that the last message was a user message
+        if message["role"] != "user": abort(400, "last message must be a user message")
+        toks += encode_role("assistant")
+
+        start_pos = prefill(model, toks[:-1])
+        last_tok = toks[-1]
+        while True:
+          GlobalCounters.reset()
+          tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
+          start_pos += 1
+          last_tok = tok
+          if tok in tokenizer.stop_tokens: break
+
+          res = {
+            "choices": [{
+              "delta": {
+                "role": "assistant",
+                "content": tokenizer.decode([tok]),
+              }
+            }]
+          }
+          yield f"data: {json.dumps(res)}\n\n"
+
+      app.run(host="0.0.0.0", port=7776, debug=True)
+    else:
+      prompt = [tokenizer.bos_id] + encode_message("system", "You are an *emotive* assistant.")
+
+      start_pos = prefill(model, prompt)
       while True:
-        GlobalCounters.reset()
-        tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
-        start_pos += 1
-        last_tok = tok
-        if tok in tokenizer.stop_tokens: break
+        toks = encode_message("user", input("Q: ")) + encode_role("assistant")
 
-        res = {
-          "choices": [{
-            "text": tokenizer.decode([tok]),
-          }]
-        }
-        yield f"data: {json.dumps(res)}\n\n"
-
-    @app.post("/v1/chat/completions")
-    def chat_completions():
-      rjson = json.loads(request.body.read())
-      if "messages" not in rjson: abort(400, "messages required")
-
-      # check if we are streaming
-      if rjson.get("stream", False):
-        response.content_type = "text/event-stream"
-        response.set_header("Cache-Control", "no-cache")
-      else: abort(400, "streaming required")
-
-      toks = [tokenizer.bos_id]
-      for message in rjson["messages"]:
-        toks += encode_message(message["role"], message["content"])
-      # ensure that the last message was a user message
-      if message["role"] != "user": abort(400, "last message must be a user message")
-      toks += encode_role("assistant")
-
-      start_pos = prefill(model, toks[:-1])
-      last_tok = toks[-1]
-      while True:
-        GlobalCounters.reset()
-        tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
-        start_pos += 1
-        last_tok = tok
-        if tok in tokenizer.stop_tokens: break
-
-        res = {
-          "choices": [{
-            "delta": {
-              "role": "assistant",
-              "content": tokenizer.decode([tok]),
-            }
-          }]
-        }
-        yield f"data: {json.dumps(res)}\n\n"
-
-    app.run(host="0.0.0.0", port=7776, debug=True)
-  else:
-    prompt = [tokenizer.bos_id] + encode_message("system", "You are an *emotive* assistant.")
-
-    start_pos = prefill(model, prompt)
-    while True:
-      toks = encode_message("user", input("Q: ")) + encode_role("assistant")
-
-      start_pos = prefill(model, toks, start_pos=start_pos)
-      last_tok = toks[-1]
-      while True:
-        GlobalCounters.reset()
-        tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
-        start_pos += 1
-        last_tok = tok
-        if tok in tokenizer.stop_tokens: break
-        print(tokenizer.decode([tok]), end="", flush=True)
-      print(flush=True)
+        start_pos = prefill(model, toks, start_pos=start_pos)
+        last_tok = toks[-1]
+        while True:
+          GlobalCounters.reset()
+          tok = model(Tensor([[last_tok]], device=device), start_pos, TEMPERATURE, TOP_K, TOP_P, ALPHA_F, ALPHA_P).item()
+          start_pos += 1
+          last_tok = tok
+          if tok in tokenizer.stop_tokens: break
+          print(tokenizer.decode([tok]), end="", flush=True)
+        print(flush=True)

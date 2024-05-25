@@ -587,87 +587,87 @@ if __name__=="__main__":
   vits_model = args.model
   encoder_location, vits_location = ENCODER_MODELS[ENCODER_MODEL], VITS_MODELS[vits_model]
 
-  Tensor.no_grad, Tensor.training = True, False
-  # Get Synthesizer and ContentVec
-  net_g, hps = Synthesizer.load_from_pretrained(vits_location[0], vits_location[2], vits_location[1], vits_location[3])
-  Encoder = get_encoder(hps.model.ssl_dim)
-  encoder = Encoder.load_from_pretrained(encoder_location[0], encoder_location[1])
+  with Tensor.inference_mode():
+    # Get Synthesizer and ContentVec
+    net_g, hps = Synthesizer.load_from_pretrained(vits_location[0], vits_location[2], vits_location[1], vits_location[3])
+    Encoder = get_encoder(hps.model.ssl_dim)
+    encoder = Encoder.load_from_pretrained(encoder_location[0], encoder_location[1])
 
-  # model config args
-  target_sample, spk2id, hop_length, target_sample = hps.data.sampling_rate, hps.spk, hps.data.hop_length, hps.data.sampling_rate
-  vol_embedding = hps.model.vol_embedding if hasattr(hps.data, "vol_embedding") and hps.model.vol_embedding is not None else False
+    # model config args
+    target_sample, spk2id, hop_length = hps.data.sampling_rate, hps.spk, hps.data.hop_length
+    vol_embedding = hps.model.vol_embedding if hasattr(hps.data, "vol_embedding") and hps.model.vol_embedding is not None else False
 
-  # args
-  slice_db, clip_seconds, lg_num, pad_seconds, tran, noise_scale, audio_path = args.slice_db, args.clip_seconds, args.lg_num, args.pad_seconds, args.tran, args.noise_scale, args.file
-  speaker = args.speaker if args.speaker is not None else list(hps.spk.__dict__.keys())[0]
+    # args
+    slice_db, clip_seconds, lg_num, pad_seconds, tran, noise_scale, audio_path = args.slice_db, args.clip_seconds, args.lg_num, args.pad_seconds, args.tran, args.noise_scale, args.file
+    speaker = args.speaker if args.speaker is not None else list(hps.spk.__dict__.keys())[0]
 
-  ### Loading audio and slicing ###
-  if audio_path == DEMO_PATH: download_if_not_present(DEMO_PATH, DEMO_URL)
-  assert Path(audio_path).is_file() and Path(audio_path).suffix == ".wav"
-  chunks = preprocess.cut(audio_path, db_thresh=slice_db)
-  audio_data, audio_sr = preprocess.chunks2audio(audio_path, chunks)
+    ### Loading audio and slicing ###
+    if audio_path == DEMO_PATH: download_if_not_present(DEMO_PATH, DEMO_URL)
+    assert Path(audio_path).is_file() and Path(audio_path).suffix == ".wav"
+    chunks = preprocess.cut(audio_path, db_thresh=slice_db)
+    audio_data, audio_sr = preprocess.chunks2audio(audio_path, chunks)
 
-  per_size = int(clip_seconds * audio_sr)
-  lg_size = int(lg_num * audio_sr)
+    per_size = int(clip_seconds * audio_sr)
+    lg_size = int(lg_num * audio_sr)
 
-  ### Infer per slice ###
-  global_frame = 0
-  audio = []
-  for (slice_tag, data) in audio_data:
-    print(f"\n====segment start, {round(len(data) / audio_sr, 3)}s====")
-    length = int(np.ceil(len(data) / audio_sr * target_sample))
+    ### Infer per slice ###
+    global_frame = 0
+    audio = []
+    for (slice_tag, data) in audio_data:
+      print(f"\n====segment start, {round(len(data) / audio_sr, 3)}s====")
+      length = int(np.ceil(len(data) / audio_sr * target_sample))
 
-    if slice_tag:
-      print("empty segment")
-      _audio = np.zeros(length)
-      audio.extend(list(pad_array(_audio, length)))
-      global_frame += length // hop_length
-      continue
+      if slice_tag:
+        print("empty segment")
+        _audio = np.zeros(length)
+        audio.extend(list(pad_array(_audio, length)))
+        global_frame += length // hop_length
+        continue
 
-    datas = [data] if per_size == 0 else split_list_by_n(data, per_size, lg_size)
+      datas = [data] if per_size == 0 else split_list_by_n(data, per_size, lg_size)
 
-    for k, dat in enumerate(datas):
-      per_length = int(np.ceil(len(dat) / audio_sr * target_sample)) if clip_seconds!=0 else length
-      pad_len = int(audio_sr * pad_seconds)
-      dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
-      raw_path = io.BytesIO()
-      soundfile.write(raw_path, dat, audio_sr, format="wav")
-      raw_path.seek(0)
+      for dat in datas:
+        per_length = int(np.ceil(len(dat) / audio_sr * target_sample)) if clip_seconds!=0 else length
+        pad_len = int(audio_sr * pad_seconds)
+        dat = np.concatenate([np.zeros([pad_len]), dat, np.zeros([pad_len])])
+        raw_path = io.BytesIO()
+        soundfile.write(raw_path, dat, audio_sr, format="wav")
+        raw_path.seek(0)
 
-      ### Infer START ###
-      wav, sr = preprocess.load_audiofile(raw_path)
-      wav = preprocess.sinc_interp_resample(wav, sr, target_sample)[0]
-      wav16k, f0, uv = preprocess.get_unit_f0(wav, tran, hop_length, target_sample)
-      sid = get_sid(spk2id, speaker)
-      n_frames = f0.shape[1]
+        ### Infer START ###
+        wav, sr = preprocess.load_audiofile(raw_path.getvalue().decode('utf-8'))
+        wav = preprocess.sinc_interp_resample(wav, sr, target_sample)[0]
+        wav16k, f0, uv = preprocess.get_unit_f0(wav, tran, hop_length, target_sample)
+        sid = get_sid(spk2id, speaker)
+        n_frames = f0.shape[1]
 
-      # ContentVec infer
-      start = time.time()
-      c = encoder.encode(wav16k)
-      c = repeat_expand_2d_left(c.squeeze(0).realize(), f0.shape[1])  # interpolate speech encoding to match f0
-      c = c.unsqueeze(0).realize()
-      enc_time = time.time() - start
+        # ContentVec infer
+        start = time.time()
+        c = encoder.encode(wav16k)
+        c = repeat_expand_2d_left(c.squeeze(0).realize(), f0.shape[1])  # interpolate speech encoding to match f0
+        c = c.unsqueeze(0).realize()
+        enc_time = time.time() - start
 
-      # VITS infer
-      vits_start = time.time()
-      out_audio, f0 = net_g.infer(c, f0=f0, uv=uv, g=sid, noise_scale=noise_scale, vol=None)
-      out_audio = out_audio[0,0].float().realize()
-      vits_time = time.time() - vits_start
+        # VITS infer
+        vits_start = time.time()
+        out_audio, f0 = net_g.infer(c, f0=f0, uv=uv, g=sid, noise_scale=noise_scale, vol=None)
+        out_audio = out_audio[0,0].float().realize()
+        vits_time = time.time() - vits_start
 
-      infer_time = time.time() - start
-      logging.info("total infer time:{:.2f}s, speech_enc time:{:.2f}s, vits time:{:.2f}s".format(infer_time, enc_time, vits_time))
-      ### Infer END ###
+        infer_time = time.time() - start
+        logging.info("total infer time:{:.2f}s, speech_enc time:{:.2f}s, vits time:{:.2f}s".format(infer_time, enc_time, vits_time))
+        ### Infer END ###
 
-      out_sr, out_frame = out_audio.shape[-1], n_frames
-      global_frame += out_frame
-      _audio = out_audio.numpy()
-      pad_len = int(target_sample * pad_seconds)
-      _audio = _audio[pad_len:-pad_len]
-      _audio = pad_array(_audio, per_length)
-      audio.extend(list(_audio))
+        out_sr, out_frame = out_audio.shape[-1], n_frames
+        global_frame += out_frame
+        _audio = out_audio.numpy()
+        pad_len = int(target_sample * pad_seconds)
+        _audio = _audio[pad_len:-pad_len]
+        _audio = pad_array(_audio, per_length)
+        audio.extend(list(_audio))
 
-  audio = np.array(audio)
-  out_path = Path(args.out_path or Path(args.out_dir)/f"{args.model}{f'_spk_{speaker}'}_{args.base_name}.wav")
-  out_path.parent.mkdir(parents=True, exist_ok=True)
-  soundfile.write(out_path, audio, target_sample, format="flac")
-  logging.info(f"Saved audio output to {out_path}")
+    audio = np.array(audio)
+    out_path = Path(args.out_path or Path(args.out_dir)/f"{args.model}{f'_spk_{speaker}'}_{args.base_name}.wav")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    soundfile.write(out_path, audio, target_sample, format="flac")
+    logging.info(f"Saved audio output to {out_path}")

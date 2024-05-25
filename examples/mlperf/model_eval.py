@@ -241,12 +241,10 @@ def eval_mrcnn():
 
 if __name__ == "__main__":
   # inference only
-  Tensor.training = False
-  Tensor.no_grad = True
-
-  models = getenv("MODEL", "resnet,retinanet,unet3d,rnnt,bert,mrcnn").split(",")
-  for m in models:
-    nm = f"eval_{m}"
-    if nm in globals():
-      print(f"eval {m}")
-      globals()[nm]()
+  with Tensor.inference_mode():
+    models = str(getenv("MODEL", "resnet,retinanet,unet3d,rnnt,bert,mrcnn")).split(",")
+    for m in models:
+      nm = f"eval_{m}"
+      if nm in globals():
+        print(f"eval {m}")
+        globals()[nm]()

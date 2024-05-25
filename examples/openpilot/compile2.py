@@ -23,8 +23,8 @@ from tinygrad.ops import LoadOps
 Device.DEFAULT = "GPU"
 
 def get_schedule(onnx_data) -> Tuple[List[ScheduleItem], List[ScheduleItem]]:
-  Tensor.no_grad = True
-  Tensor.training = False
+  Tensor.is_grad_enabled = False
+  Tensor.is_train_enabled = False
 
   # load the model
   onnx_model = onnx.load(io.BytesIO(onnx_data))
@@ -200,5 +200,3 @@ if __name__ == "__main__":
       test_vs_onnx(onnx_data, eis, inputs)
     except ModuleNotFoundError as e:
       print(f"TEST NOT HAPPENING {e}")
-
-

@@ -1,6 +1,7 @@
 import os, time, math, functools
 from pathlib import Path
 from tqdm import tqdm
+from typing import Tuple
 import multiprocessing
 
 from tinygrad import Device, GlobalCounters, Tensor, TinyJit, dtypes
@@ -9,12 +10,12 @@ from tinygrad.nn.state import get_parameters, get_state_dict, safe_load, safe_sa
 from tinygrad.nn.optim import LAMB, LARS, SGD, OptimizerGroup
 
 from extra.lr_scheduler import LRSchedulerGroup
+from extra.datasets.imagenet import get_train_files, get_val_files
 from examples.mlperf.helpers import get_training_state, load_training_state
 
 def train_resnet():
   from extra.models import resnet
   from examples.mlperf.dataloader import batch_load_resnet
-  from extra.datasets.imagenet import get_train_files, get_val_files
   from examples.mlperf.lr_schedulers import PolynomialDecayWithWarmup
   from examples.mlperf.initializers import Conv2dHeNormal, Linear
   from examples.hlb_cifar10 import UnsyncedBatchNorm
@@ -48,7 +49,8 @@ def train_resnet():
   else:
     MLLOGGER = None
 
-  GPUS = config["GPUS"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
+  GPUS: Tuple[str, ...]
+  GPUS = config["GPUS"] = tuple(f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1)))
   print(f"training on {GPUS}")
   for x in GPUS: Device[x]
 
@@ -115,7 +117,6 @@ def train_resnet():
   if MLLOGGER:
     if RUNMLPERF:
       MLLOGGER.event(key=mllog_constants.GLOBAL_BATCH_SIZE, value=BS)
-      from extra.datasets.imagenet import get_train_files, get_val_files
       MLLOGGER.event(key=mllog_constants.TRAIN_SAMPLES, value=len(get_train_files()))
       MLLOGGER.event(key=mllog_constants.EVAL_SAMPLES, value=len(get_val_files()))
 
@@ -190,81 +191,78 @@ def train_resnet():
     # ** train loop **
     if MLLOGGER and RUNMLPERF:
       MLLOGGER.start(key=mllog_constants.EPOCH_START, value=e+1, metadata=dict(epoch_num=e+1))
-    Tensor.training = True
-    BEAM.value = TRAIN_BEAM
+    with Tensor.train():
+      BEAM.value = TRAIN_BEAM
 
-    if INITMLPERF:
-      i, proc = 0, fake_data_get(BS)
-    else:
-      batch_loader = batch_load_resnet(batch_size=BS, val=False, shuffle=True, seed=seed*epochs + e, pad_first_batch=True)
-      it = iter(tqdm(batch_loader, total=steps_in_train_epoch, desc=f"epoch {e}", disable=BENCHMARK))
-      i, proc = 0, data_get(it)
+      if INITMLPERF:
+        i, proc = 0, fake_data_get(BS)
+      else:
+        batch_loader = batch_load_resnet(batch_size=BS, val=False, shuffle=True, seed=seed*epochs + e, pad_first_batch=True)
+        it = iter(tqdm(batch_loader, total=steps_in_train_epoch, desc=f"epoch {e}", disable=BENCHMARK))
+        i, proc = 0, data_get(it)
 
-    prev_cookies = []
-    st = time.perf_counter()
-    while proc is not None:
-      GlobalCounters.reset()
-      (loss, top_1), y, proc = train_step(proc[0], proc[1]), proc[2], proc[3]
+      prev_cookies = []
+      st = time.perf_counter()
+      while proc is not None:
+        GlobalCounters.reset()
+        (loss, top_1), y, proc = train_step(proc[0], proc[1]), proc[2], proc[3]
 
-      pt = time.perf_counter()
+        pt = time.perf_counter()
 
-      if len(prev_cookies) == getenv("STORE_COOKIES", 1): prev_cookies = []  # free previous cookies after gpu work has been enqueued
-      try:
-        if INITMLPERF:
-          next_proc = fake_data_get(BS)
-        else:
-          next_proc = data_get(it)
-      except StopIteration:
-        next_proc = None
+        if len(prev_cookies) == getenv("STORE_COOKIES", 1): prev_cookies = []  # free previous cookies after gpu work has been enqueued
+        try:
+          next_proc = fake_data_get(BS) if INITMLPERF else data_get(it)
+        except StopIteration:
+          next_proc = None
 
-      dt = time.perf_counter()
+        dt = time.perf_counter()
 
-      device_str = loss.device if isinstance(loss.device, str) else f"{loss.device[0]} * {len(loss.device)}"
-      loss, top_1 = loss.numpy().item(), top_1.numpy().item()
-      top_1_acc = top_1 / sum(yi != -1 for yi in y)
+        device_str = loss.device if isinstance(loss.device, str) else f"{loss.device[0]} * {len(loss.device)}"
+        loss, top_1 = loss.numpy().item(), top_1.numpy().item()
+        top_1_acc = top_1 / sum(yi != -1 for yi in y)
 
-      cl = time.perf_counter()
-      if BENCHMARK:
-        step_times.append(cl - st)
+        cl = time.perf_counter()
+        if BENCHMARK:
+          step_times.append(cl - st)
 
-      tqdm.write(
-        f"{i:5} {((cl - st)) * 1000.0:7.2f} ms run, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms fetch data, "
-        f"{(cl - dt) * 1000.0:7.2f} ms {device_str}, {loss:5.2f} loss, {top_1_acc:3.2f} acc, {optimizer.lr.numpy()[0]:.6f} LR, "
-        f"{GlobalCounters.mem_used / 1e9:.2f} GB used, {GlobalCounters.global_ops * 1e-9 / (cl - st):9.2f} GFLOPS")
-      if WANDB:
-        wandb.log({"lr": optimizer.lr.numpy(), "train/loss": loss, "train/top_1_acc": top_1_acc, "train/step_time": cl - st,
-                   "train/python_time": pt - st, "train/data_time": dt - pt, "train/cl_time": cl - dt,
-                   "train/GFLOPS": GlobalCounters.global_ops * 1e-9 / (cl - st), "epoch": e + (i + 1) / steps_in_train_epoch})
+        tqdm.write(
+          f"{i:5} {((cl - st)) * 1000.0:7.2f} ms run, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms fetch data, "
+          f"{(cl - dt) * 1000.0:7.2f} ms {device_str}, {loss:5.2f} loss, {top_1_acc:3.2f} acc, {optimizer.lr.numpy()[0]:.6f} LR, "
+          f"{GlobalCounters.mem_used / 1e9:.2f} GB used, {GlobalCounters.global_ops * 1e-9 / (cl - st):9.2f} GFLOPS")
+        if WANDB:
+          wandb.log({"lr": optimizer.lr.numpy(), "train/loss": loss, "train/top_1_acc": top_1_acc, "train/step_time": cl - st,
+                    "train/python_time": pt - st, "train/data_time": dt - pt, "train/cl_time": cl - dt,
+                    "train/GFLOPS": GlobalCounters.global_ops * 1e-9 / (cl - st), "epoch": e + (i + 1) / steps_in_train_epoch})
 
-      st = cl
-      prev_cookies.append(proc)
-      proc, next_proc = next_proc, None  # return old cookie
-      i += 1
+        st = cl
+        prev_cookies.append(proc)
+        proc, next_proc = next_proc, None  # return old cookie
+        i += 1
 
-      if i == BENCHMARK:
-        assert not math.isnan(loss)
-        median_step_time = sorted(step_times)[(BENCHMARK + 1) // 2]  # in seconds
-        estimated_total_minutes = int(median_step_time * steps_in_train_epoch * epochs / 60)
-        print(f"Estimated training time: {estimated_total_minutes // 60}h{estimated_total_minutes % 60}m")
-        print(f"epoch global_ops: {steps_in_train_epoch * GlobalCounters.global_ops:_}, "
-              f"epoch global_mem: {steps_in_train_epoch * GlobalCounters.global_mem:_}")
-        # if we are doing beam search, run the first eval too
-        if (TRAIN_BEAM or EVAL_BEAM) and e == start_epoch: break
-        return
-    if MLLOGGER and RUNMLPERF:
-      MLLOGGER.event(key=mllog_constants.EPOCH_STOP, value=e+1, metadata=dict(epoch_num=e+1))
-
-    # ** eval loop **
-    # always eval for epoch >= 33 to stop the clock as soon as eval target hits, it can converge in epoch in [33, 37]
-    if steps_in_val_epoch > 0 and ((e + 1 - eval_start_epoch) % eval_freq == 0 or e + 1 >= 33):
+        if i == BENCHMARK:
+          assert not math.isnan(loss)
+          median_step_time = sorted(step_times)[(BENCHMARK + 1) // 2]  # in seconds
+          estimated_total_minutes = int(median_step_time * steps_in_train_epoch * epochs / 60)
+          print(f"Estimated training time: {estimated_total_minutes // 60}h{estimated_total_minutes % 60}m")
+          print(f"epoch global_ops: {steps_in_train_epoch * GlobalCounters.global_ops:_}, "
+                f"epoch global_mem: {steps_in_train_epoch * GlobalCounters.global_mem:_}")
+          # if we are doing beam search, run the first eval too
+          if (TRAIN_BEAM or EVAL_BEAM) and e == start_epoch: break
+          return
       if MLLOGGER and RUNMLPERF:
-        MLLOGGER.start(key=mllog_constants.EVAL_START, value=e+1, metadata=dict(epoch_num=e+1))
-      if getenv("RESET_STEP", 1): train_step.reset()  # free the train step memory :(
-      eval_times = []
-      eval_loss = 0.0
-      eval_top_1 = 0
-      eval_num_samples = 0
-      Tensor.training = False
+        MLLOGGER.event(key=mllog_constants.EPOCH_STOP, value=e+1, metadata=dict(epoch_num=e+1))
+
+      # ** eval loop **
+      # always eval for epoch >= 33 to stop the clock as soon as eval target hits, it can converge in epoch in [33, 37]
+      if steps_in_val_epoch > 0 and ((e + 1 - eval_start_epoch) % eval_freq == 0 or e + 1 >= 33):
+        if MLLOGGER and RUNMLPERF:
+          MLLOGGER.start(key=mllog_constants.EVAL_START, value=e+1, metadata=dict(epoch_num=e+1))
+        if getenv("RESET_STEP", 1): train_step.reset()  # free the train step memory :(
+        eval_times = []
+        eval_loss = 0.0
+        eval_top_1 = 0
+        eval_num_samples = 0
+
       BEAM.value = EVAL_BEAM
 
       if INITMLPERF:
@@ -272,7 +270,7 @@ def train_resnet():
       else:
         it = iter(tqdm(batch_load_resnet(batch_size=EVAL_BS, val=True, shuffle=False, pad_first_batch=True), total=steps_in_val_epoch))
         i, proc = 0, data_get(it)
-        
+
       prev_cookies = []
       while proc is not None:
         GlobalCounters.reset()
@@ -282,10 +280,7 @@ def train_resnet():
 
         if len(prev_cookies) == getenv("STORE_COOKIES", 1): prev_cookies = []  # free previous cookies after gpu work has been enqueued
         try:
-          if INITMLPERF:
-            next_proc = fake_data_get(EVAL_BS)
-          else:
-            next_proc = data_get(it)
+          next_proc = fake_data_get(EVAL_BS) if INITMLPERF else data_get(it)
         except StopIteration:
           next_proc = None
 
@@ -383,9 +378,9 @@ def eval_step_bert(model, input_ids:Tensor, segment_ids:Tensor, attention_mask:T
   lm_loss = lm_logits.sparse_categorical_crossentropy(masked_lm_ids, ignore_index=masked_lm_weights)
   clsf_loss = clsf_logits.binary_crossentropy_logits(next_sentence_labels)
   return {
-    "masked_lm_accuracy": mlm_accuracy.realize(), 
-    "masked_lm_loss": lm_loss.realize(), 
-    "next_sentence_accuracy": clsf_accuracy.realize(), 
+    "masked_lm_accuracy": mlm_accuracy.realize(),
+    "masked_lm_loss": lm_loss.realize(),
+    "next_sentence_accuracy": clsf_accuracy.realize(),
     "next_sentence_loss": clsf_loss.realize()
   }
 
@@ -398,7 +393,8 @@ def train_bert():
   config = {}
   BASEDIR = getenv("BASEDIR", Path(__file__).parent.parents[1] / "extra" / "datasets" / "wiki")
 
-  GPUS = config["GPUS"] = [f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1))]
+  GPUS: Tuple[str, ...]
+  GPUS = config["GPUS"] = tuple(f"{Device.DEFAULT}:{i}" for i in range(getenv("GPUS", 1)))
   print(f"training on {GPUS}")
   for x in GPUS: Device[x]
   seed = config["seed"] = getenv("SEED", 12345)
@@ -421,7 +417,7 @@ def train_bert():
   decay              = config["decay"]                  = getenv("DECAY", 0.01)
   poly_power         = config["poly_power"]             = getenv("POLY_POWER", 1.0)
 
-  target, achieved                                      = getenv("TARGET", 0.72), False
+  target, achieved                      = getenv("TARGET", 0.72), False
 
   config["DEFAULT_FLOAT"] = dtypes.default_float.name
   config["TRAIN_BEAM"]    = TRAIN_BEAM = getenv("TRAIN_BEAM", BEAM.value)
@@ -431,7 +427,7 @@ def train_bert():
 
   model = get_mlperf_bert_model()
   if init_ckpt: init_bert_from_checkpoint(model, init_ckpt)
-  
+
   for _, x in get_state_dict(model).items():
     x.realize().to_(GPUS)
   parameters = get_parameters(model)
@@ -478,113 +474,114 @@ def train_bert():
   wc_start = time.perf_counter()
   i, train_data = start_step, get_data_bert(GPUS, train_it)
   while train_data is not None and i < train_steps and not achieved:
-    Tensor.training = True
-    BEAM.value = TRAIN_BEAM
-    st = time.perf_counter()
-    GlobalCounters.reset()
-    loss = train_step_bert(model, optimizer_group, scheduler_group, loss_scaler,
-      train_data["input_ids"], train_data["segment_ids"], train_data["input_mask"], train_data["masked_lm_positions"], \
-      train_data["masked_lm_ids"], train_data["masked_lm_weights"], train_data["next_sentence_labels"])
+    with Tensor.train():
+      BEAM.value = TRAIN_BEAM
+      st = time.perf_counter()
+      GlobalCounters.reset()
+      loss = train_step_bert(model, optimizer_group, scheduler_group, loss_scaler,
+        train_data["input_ids"], train_data["segment_ids"], train_data["input_mask"], train_data["masked_lm_positions"], \
+        train_data["masked_lm_ids"], train_data["masked_lm_weights"], train_data["next_sentence_labels"])
 
-    pt = time.perf_counter()
+      pt = time.perf_counter()
 
-    try:
-      next_data = get_data_bert(GPUS, train_it)
-    except StopIteration:
-      next_data = None
+      try:
+        next_data = get_data_bert(GPUS, train_it)
+      except StopIteration:
+        next_data = None
 
-    dt = time.perf_counter()
+      dt = time.perf_counter()
 
-    device_str = loss.device if isinstance(loss.device, str) else f"{loss.device[0]} * {len(loss.device)}"
-    loss = loss.numpy().item()
+      device_str = loss.device if isinstance(loss.device, str) else f"{loss.device[0]} * {len(loss.device)}"
+      loss = loss.numpy().item()
 
-    cl = time.perf_counter()
-    if BENCHMARK: step_times.append(cl - st)
+      cl = time.perf_counter()
+      if BENCHMARK: step_times.append(cl - st)
 
-    tqdm.write(
-      f"{i:5} {((cl - st)) * 1000.0:7.2f} ms run, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms fetch data, "
-      f"{(cl - dt) * 1000.0:7.2f} ms {device_str}, {loss:5.2f} loss, {optimizer_wd.lr.numpy()[0]:.6f} LR, "
-      f"{GlobalCounters.mem_used / 1e9:.2f} GB used, {GlobalCounters.global_ops * 1e-9 / (cl - st):9.2f} GFLOPS")
-    if WANDB:
-      wandb.log({"lr": optimizer_wd.lr.numpy(), "train/loss": loss, "train/step_time": cl - st,
-                  "train/python_time": pt - st, "train/data_time": dt - pt, "train/cl_time": cl - dt,
-                  "train/GFLOPS": GlobalCounters.global_ops * 1e-9 / (cl - st)})
-
-    train_data, next_data = next_data, None
-    i += 1
-
-    if i == BENCHMARK:
-      median_step_time = sorted(step_times)[(BENCHMARK + 1) // 2]  # in seconds
-      estimated_total_minutes = int(median_step_time * train_steps / 60)
-      print(f"Estimated training time: {estimated_total_minutes // 60}h{estimated_total_minutes % 60}m")
-      print(f"epoch global_ops: {train_steps * GlobalCounters.global_ops:_}, "
-            f"epoch global_mem: {train_steps * GlobalCounters.global_mem:_}")
-      return
-
-    # ** eval loop **
-    if i % eval_step_freq == 0 or i == 1:
-      train_step_bert.reset()  # free the train step memory :(
-      eval_lm_losses = []
-      eval_clsf_losses = []
-      eval_lm_accs = []
-      eval_clsf_accs = []
-      eval_times = []
-      Tensor.training = False
-      BEAM.value = EVAL_BEAM
-
-      for j in tqdm(range(max_eval_steps), desc="Evaluating", total=max_eval_steps, disable=BENCHMARK):
-        eval_data = get_data_bert(GPUS, eval_it)
-        GlobalCounters.reset()
-        st = time.time()
-
-        eval_result: dict[str, Tensor] = eval_step_bert(model,
-          eval_data["input_ids"], eval_data["segment_ids"], eval_data["input_mask"], eval_data["masked_lm_positions"],
-          eval_data["masked_lm_ids"], eval_data["masked_lm_weights"], eval_data["next_sentence_labels"])
-
-        lm_loss, clsf_loss  = eval_result["masked_lm_loss"].item(), eval_result["next_sentence_loss"].item()
-        lm_acc, clsf_acc = eval_result["masked_lm_accuracy"].item(), eval_result["next_sentence_accuracy"].item()
-
-        eval_lm_losses.append(lm_loss)
-        eval_clsf_losses.append(clsf_loss)
-        eval_lm_accs.append(lm_acc)
-        eval_clsf_accs.append(clsf_acc)
-
-        et = time.time()
-        eval_times.append(et - st)
-
-        if BENCHMARK and j == BENCHMARK: break
-
-      eval_step_bert.reset()
-      avg_lm_loss = sum(eval_lm_losses) / len(eval_lm_losses)
-      avg_clsf_loss = sum(eval_clsf_losses) / len(eval_clsf_losses)
-      avg_lm_acc = sum(eval_lm_accs) / len(eval_lm_accs)
-      avg_clsf_acc = sum(eval_clsf_accs) / len(eval_clsf_accs)
-      avg_fw_time = sum(eval_times) / len(eval_times)
-      results = f"eval lm loss: {avg_lm_loss:.2f}, eval clsf loss: {avg_clsf_loss:.2f}, eval lm accuracy: {avg_lm_acc:.6f}, \
-                  eval clsf accuracy: {avg_clsf_acc:.2f}, avg eval step time: {avg_fw_time:.2f}"
-      tqdm.write(results)
-      with open(getenv("EVAL_LOG", "./eval_log.txt"), "a") as file: file.write(results + "\n")
-
+      tqdm.write(
+        f"{i:5} {((cl - st)) * 1000.0:7.2f} ms run, {(pt - st) * 1000.0:7.2f} ms python, {(dt - pt) * 1000.0:6.2f} ms fetch data, "
+        f"{(cl - dt) * 1000.0:7.2f} ms {device_str}, {loss:5.2f} loss, {optimizer_wd.lr.numpy()[0]:.6f} LR, "
+        f"{GlobalCounters.mem_used / 1e9:.2f} GB used, {GlobalCounters.global_ops * 1e-9 / (cl - st):9.2f} GFLOPS")
       if WANDB:
-        wandb.log({"eval/lm_loss": avg_lm_loss, "eval/clsf_loss": avg_clsf_loss, "eval/lm_accuracy": avg_lm_acc, \
-                    "eval/clsf_accuracy": avg_clsf_acc, "eval/forward_time": avg_fw_time})
+        wandb.log({"lr": optimizer_wd.lr.numpy(), "train/loss": loss, "train/step_time": cl - st,
+                    "train/python_time": pt - st, "train/data_time": dt - pt, "train/cl_time": cl - dt,
+                    "train/GFLOPS": GlobalCounters.global_ops * 1e-9 / (cl - st)})
 
-      # save model if achieved target
-      if not achieved and avg_lm_acc >= target:
-        wc_end = time.perf_counter()
-        if not os.path.exists(ckpt_dir := save_ckpt_dir): os.mkdir(ckpt_dir)
-        fn = f"{ckpt_dir}/bert-large.safe"
-        safe_save(get_state_dict(model), fn)
-        print(f" *** Model saved to {fn} ***")
+      train_data, next_data = next_data, None
+      i += 1
 
-        total_seconds = wc_end - wc_start
-        hours = int(total_seconds // 3600)
-        minutes = int((total_seconds % 3600) // 60)
-        seconds = total_seconds % 60
-        print(f"Reference Convergence point reached after {i * BS} datasamples and {hours}h{minutes}m{seconds:.2f}s.")
-        achieved = True
-        # stop once hitting the target
-        break
+      if i == BENCHMARK:
+        median_step_time = sorted(step_times)[(BENCHMARK + 1) // 2]  # in seconds
+        estimated_total_minutes = int(median_step_time * train_steps / 60)
+        print(f"Estimated training time: {estimated_total_minutes // 60}h{estimated_total_minutes % 60}m")
+        print(f"epoch global_ops: {train_steps * GlobalCounters.global_ops:_}, "
+              f"epoch global_mem: {train_steps * GlobalCounters.global_mem:_}")
+        return
+
+      # ** eval loop **
+      if i % eval_step_freq == 0 or i == 1:
+        train_step_bert.reset()  # free the train step memory :(
+        eval_lm_losses = []
+        eval_clsf_losses = []
+        eval_lm_accs = []
+        eval_clsf_accs = []
+        eval_times = []
+
+        with Tensor.inference_mode():
+          BEAM.value = EVAL_BEAM
+
+          for j in tqdm(range(max_eval_steps), desc="Evaluating", total=max_eval_steps, disable=BENCHMARK):
+            eval_data = get_data_bert(GPUS, eval_it)
+            GlobalCounters.reset()
+            st = time.time()
+
+            eval_result: dict[str, Tensor] = eval_step_bert(model,
+              eval_data["input_ids"], eval_data["segment_ids"], eval_data["input_mask"], eval_data["masked_lm_positions"],
+              eval_data["masked_lm_ids"], eval_data["masked_lm_weights"], eval_data["next_sentence_labels"])
+
+            lm_loss, clsf_loss  = eval_result["masked_lm_loss"].item(), eval_result["next_sentence_loss"].item()
+            lm_acc, clsf_acc = eval_result["masked_lm_accuracy"].item(), eval_result["next_sentence_accuracy"].item()
+
+            eval_lm_losses.append(lm_loss)
+            eval_clsf_losses.append(clsf_loss)
+            eval_lm_accs.append(lm_acc)
+            eval_clsf_accs.append(clsf_acc)
+
+            et = time.time()
+            eval_times.append(et - st)
+
+            if BENCHMARK and j == BENCHMARK: break
+
+          eval_step_bert.reset()
+          avg_lm_loss = sum(eval_lm_losses) / len(eval_lm_losses)
+          avg_clsf_loss = sum(eval_clsf_losses) / len(eval_clsf_losses)
+          avg_lm_acc = sum(eval_lm_accs) / len(eval_lm_accs)
+          avg_clsf_acc = sum(eval_clsf_accs) / len(eval_clsf_accs)
+          avg_fw_time = sum(eval_times) / len(eval_times)
+          results = f"eval lm loss: {avg_lm_loss:.2f}, eval clsf loss: {avg_clsf_loss:.2f}, eval lm accuracy: {avg_lm_acc:.6f}, \
+                      eval clsf accuracy: {avg_clsf_acc:.2f}, avg eval step time: {avg_fw_time:.2f}"
+          tqdm.write(results)
+          with open(getenv("EVAL_LOG", "./eval_log.txt"), "a") as file: file.write(results + "\n")
+
+          if WANDB:
+            wandb.log({"eval/lm_loss": avg_lm_loss, "eval/clsf_loss": avg_clsf_loss, "eval/lm_accuracy": avg_lm_acc, \
+                        "eval/clsf_accuracy": avg_clsf_acc, "eval/forward_time": avg_fw_time})
+
+          # save model if achieved target
+          if not achieved and avg_lm_acc >= target:
+            wc_end = time.perf_counter()
+            if not os.path.exists(ckpt_dir := save_ckpt_dir): os.mkdir(ckpt_dir)
+            fn = f"{ckpt_dir}/bert-large.safe"
+            safe_save(get_state_dict(model), fn)
+            print(f" *** Model saved to {fn} ***")
+
+            total_seconds = wc_end - wc_start
+            hours = int(total_seconds // 3600)
+            minutes = int((total_seconds % 3600) // 60)
+            seconds = total_seconds % 60
+            print(f"Reference Convergence point reached after {i * BS} datasamples and {hours}h{minutes}m{seconds:.2f}s.")
+            achieved = True
+            # stop once hitting the target
+            break
 
     if getenv("CKPT") and i % save_ckpt_freq == 0:
       if not os.path.exists(ckpt_dir := save_ckpt_dir): os.mkdir(ckpt_dir)
@@ -608,7 +605,7 @@ def train_maskrcnn():
 if __name__ == "__main__":
   multiprocessing.set_start_method('spawn')
   with Tensor.train():
-    for m in getenv("MODEL", "resnet,retinanet,unet3d,rnnt,bert,maskrcnn").split(","):
+    for m in str(getenv("MODEL", "resnet,retinanet,unet3d,rnnt,bert,maskrcnn")).split(","):
       nm = f"train_{m}"
       if nm in globals():
         print(f"training {m}")

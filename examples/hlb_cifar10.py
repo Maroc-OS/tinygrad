@@ -44,7 +44,7 @@ class UnsyncedBatchNorm:
     return ret.reshape(x.shape).cast(x.dtype)
 
   def calc_stats(self, x:Tensor):
-    if Tensor.training:
+    if Tensor.is_train_enabled:
       # This requires two full memory accesses to x
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
       # There's "online" algorithms that fix this, like https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_Online_algorithm
@@ -257,7 +257,7 @@ def train_cifar():
     lambda x: x / Tensor(cifar_std, device=x.device, dtype=x.dtype).reshape((1,3,1,1)),
   ]
 
-  class modelEMA():
+  class modelEMA:
     def __init__(self, w, net):
       # self.model_ema = copy.deepcopy(net) # won't work for opencl due to unpickeable pyopencl._cl.Buffer
       self.net_ema = SpeedyResNet(w)
@@ -267,13 +267,11 @@ def train_cifar():
 
     @TinyJit
     def update(self, net, decay):
-      # TODO with Tensor.no_grad()
-      Tensor.no_grad = True
-      for net_ema_param, (param_name, net_param) in zip(get_state_dict(self.net_ema).values(), get_state_dict(net).items()):
-        # batchnorm currently is not being tracked
-        if not ("num_batches_tracked" in param_name) and not ("running" in param_name):
-          net_ema_param.assign(net_ema_param.detach()*decay + net_param.detach()*(1.-decay)).realize()
-      Tensor.no_grad = False
+      with Tensor.no_grad():
+        for net_ema_param, (param_name, net_param) in zip(get_state_dict(self.net_ema).values(), get_state_dict(net).items()):
+          # batchnorm currently is not being tracked
+          if ("num_batches_tracked" not in param_name and "running" not in param_name):
+            net_ema_param.assign(net_ema_param.detach()*decay + net_param.detach()*(1.-decay)).realize()
 
   set_seed(getenv('SEED', hyp['seed']))
 
@@ -431,4 +429,5 @@ def train_cifar():
       raise ValueError(colored(f"{eval_acc_pct=} < {target}", "red"))
 
 if __name__ == "__main__":
-  train_cifar()
+  with Tensor.train():
+    train_cifar()
