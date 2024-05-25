@@ -34,7 +34,14 @@ class Function:
     ctx = fxn(x[0].device, *x)
     ret = Tensor.__new__(Tensor)
     ret.lazydata, ret.requires_grad, ret.grad = ctx.forward(*[t.lazydata for t in x], **kwargs), ctx.requires_grad, None
-    ret._ctx = ctx if ctx.requires_grad and not Tensor.no_grad else None  # used by autograd engine
+    if ctx.requires_grad and Tensor.inference_tensor: raise RuntimeError("Setting requires_grad=True on inference tensor outside InferenceMode is not allowed.")
+    elif ctx.requires_grad and Tensor.is_grad_enabled:
+      Tensor.is_inference_mode_enabled = False
+      Tensor.inference_tensor = False
+      ret._ctx = ctx
+    else:
+      ret._ctx = None
+
     return ret
 
 import tinygrad.function as F
@@ -82,17 +89,48 @@ class Tensor:
   """
   __slots__ = "lazydata", "requires_grad", "grad", "_ctx"
   __deletable__ = ('_ctx',)
-  training: ClassVar[bool] = False
-  class train(ContextDecorator):
-    def __init__(self, mode:bool = True): self.mode = mode
-    def __enter__(self): self.prev, Tensor.training = Tensor.training, self.mode
-    def __exit__(self, exc_type, exc_value, traceback): Tensor.training = self.prev
+  is_grad_enabled: ClassVar[bool] = True
+  is_train_enabled: ClassVar[bool] = False
+  is_inference_mode_enabled: ClassVar[bool] = False
+  inference_tensor: ClassVar[bool] = False
 
-  no_grad: ClassVar[bool] = False
-  class inference_mode(ContextDecorator):
-    def __init__(self, mode:bool = True): self.mode = mode
-    def __enter__(self): self.prev, Tensor.no_grad = Tensor.no_grad, self.mode
-    def __exit__(self, exc_type, exc_value, traceback): Tensor.no_grad = self.prev
+  @classmethod
+  @contextmanager
+  def train(cls, mode=True):
+    prev_mode = cls.is_train_enabled
+    cls.is_train_enabled = mode
+    cls.inference_tensor = False
+    try:
+      yield
+    finally:
+      cls.is_train_enabled = prev_mode
+      cls.inference_tensor = False
+
+  @classmethod
+  @contextmanager
+  def no_grad(cls, mode=True):
+    prev_mode = cls.is_grad_enabled
+    cls.is_grad_enabled = not mode
+    cls.inference_tensor = False
+    try:
+      yield
+    finally:
+      cls.is_grad_enabled = prev_mode
+      cls.inference_tensor = False
+
+  @classmethod
+  @contextmanager
+  def inference_mode(cls, mode=True):
+    # TODO: disable view tracking, versioning, etc. All things that are not needed in that mode should be disabled
+    prev_mode = cls.is_inference_mode_enabled
+    cls.is_inference_mode_enabled = mode
+    cls.inference_tensor = False
+    try:
+      yield
+    finally:
+      cls.is_inference_mode_enabled = prev_mode
+      cls.inference_tensor = mode
+
   def __init__(self, data:Union[None, ConstType, List, Tuple, LazyBuffer, np.ndarray, bytes, MultiLazyBuffer, Variable],
                device:Optional[Union[str, tuple, list]]=None, dtype:Optional[DType]=None, requires_grad:Optional[bool]=None):
     assert dtype is None or isinstance(dtype, DType), f"invalid dtype {dtype}"
@@ -2598,7 +2636,7 @@ class Tensor:
     """
     Applies dropout to `self`.
 
-    NOTE: dropout is only applied when `Tensor.training` is `True`.
+    NOTE: dropout is only applied when `Tensor.is_train_enabled` is `True`.
 
     - Described: https://paperswithcode.com/method/dropout
     - Paper: https://jmlr.org/papers/v15/srivastava14a.html
@@ -2610,7 +2648,7 @@ class Tensor:
       print(t.dropout().numpy())
     ```
     """
-    if not Tensor.training or p == 0: return self
+    if not Tensor.is_train_enabled or p == 0: return self
     return self * (Tensor.rand(*self.shape, requires_grad=False, dtype=dtypes.default_float, device=self.device) >= p) * (1/(1.0 - p))
 
   def one_hot(self, num_classes:int) -> Tensor:
