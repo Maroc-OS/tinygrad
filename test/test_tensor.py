@@ -3,7 +3,6 @@ import torch
 import unittest, copy
 import mmap
 from tinygrad import Tensor, Device, dtypes
-from tinygrad.nn import Dropout
 from tinygrad.helpers import temp, CI
 from extra.gradcheck import numerical_jacobian, jacobian, gradcheck
 from hypothesis import given, settings, strategies as strat
