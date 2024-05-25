@@ -3,6 +3,7 @@ import torch
 import unittest, copy
 import mmap
 from tinygrad import Tensor, Device, dtypes
+from tinygrad.nn import Dropout
 from tinygrad.helpers import temp, CI
 from extra.gradcheck import numerical_jacobian, jacobian, gradcheck
 from hypothesis import given, settings, strategies as strat
@@ -104,7 +105,8 @@ class TestTinygrad(unittest.TestCase):
   def test_dropout(self):
     with Tensor.train():
       n, rate = 1_000_000, 0.1
-      w = Tensor.ones(n).dropout(rate)
+      dr = Dropout(rate)
+      w = dr(Tensor.ones(n))
       non_zeros = np.count_nonzero(w.numpy())
       expected = n * (1 - rate)
       np.testing.assert_allclose(non_zeros, expected, rtol=2e-3)
@@ -523,12 +525,12 @@ class TestTensorCreationDevice(unittest.TestCase):
 
 class TestTrainMode(unittest.TestCase):
   def test_train_mode(self):
-    assert not Tensor.training
+    assert not Tensor.is_train_enabled
     @Tensor.train()
     def f():
-      assert Tensor.training
+      assert Tensor.is_train_enabled
     f()
-    assert not Tensor.training
+    assert not Tensor.is_train_enabled
 
 class TestInferenceMode(unittest.TestCase):
   def test_inference_mode(self):
@@ -541,18 +543,59 @@ class TestInferenceMode(unittest.TestCase):
       out = mm.relu()
       out = out.sum()
       out.backward()
+    assert x.grad is not None
+    assert m.grad is not None
+    assert tmp.grad is not None
+    assert mm.grad is not None
+    assert W.grad is not None
+    assert W.requires_grad
+    assert Tensor.inference_tensor
+    assert not Tensor.is_inference_mode_enabled
+
+  def test_inference_mode_context_manager(self):
+    x = Tensor(x_init, requires_grad=True)
+    m = Tensor(m_init, requires_grad=True)
+    W = Tensor(W_init, requires_grad=True)
+    @Tensor.inference_mode()
+    def f(x, m, W):
+      tmp = x.mul(m)
+      mm = tmp.matmul(W)
+      out = mm.relu()
+      out = out.sum()
+      out.backward()
+      assert x.grad is not None
+      assert m.grad is not None
+      assert tmp.grad is not None
+      assert mm.grad is not None
+      assert W.grad is not None
+    f(x, m, W)
+    assert Tensor.inference_tensor
+    assert not Tensor.is_inference_mode_enabled
+
+class TestNoGradMode(unittest.TestCase):
+  def test_no_grad_mode(self):
+    x = Tensor(x_init, requires_grad=True)
+    m = Tensor(m_init, requires_grad=True)
+    W = Tensor(W_init, requires_grad=True)
+    with Tensor.no_grad():
+      tmp = x.mul(m)
+      mm = tmp.matmul(W)
+      out = mm.relu()
+      out = out.sum()
+      out.backward()
     assert x.grad is None
     assert m.grad is None
     assert tmp.grad is None
     assert mm.grad is None
     assert W.grad is None
     assert W.requires_grad
+    assert Tensor.is_grad_enabled
 
   def test_no_grad_mode_context_manager(self):
     x = Tensor(x_init, requires_grad=True)
     m = Tensor(m_init, requires_grad=True)
     W = Tensor(W_init, requires_grad=True)
-    @Tensor.inference_mode()
+    @Tensor.no_grad()
     def f(x, m, W):
       tmp = x.mul(m)
       mm = tmp.matmul(W)
@@ -565,6 +608,7 @@ class TestInferenceMode(unittest.TestCase):
       assert mm.grad is None
       assert W.grad is None
     f(x, m, W)
+    assert Tensor.is_grad_enabled
 
 if __name__ == '__main__':
   unittest.main()
