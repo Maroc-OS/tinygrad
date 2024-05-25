@@ -31,26 +31,25 @@ if __name__ == "__main__":
   assert all(os.path.exists(os.path.join(INIT_CKPT_DIR, f)) for f in required_files), \
     f"Missing checkpoint files in INIT_CKPT_DIR: {required_files}"
 
-  Tensor.training = False
+  with Tensor.inference_mode():
+    model = get_mlperf_bert_model()
+    init_bert_from_checkpoint(model, INIT_CKPT_DIR) # Test the actual loading of the checkpoint
 
-  model = get_mlperf_bert_model()
-  init_bert_from_checkpoint(model, INIT_CKPT_DIR) # Test the actual loading of the checkpoint
+    for _, x in get_state_dict(model).items():
+      x.realize().to_(GPUS)
 
-  for _, x in get_state_dict(model).items():
-    x.realize().to_(GPUS)
+    eval_accuracy = []
+    eval_it = iter(batch_load_val_bert(EVAL_BS))
 
-  eval_accuracy = []
-  eval_it = iter(batch_load_val_bert(EVAL_BS))
+    for _ in tqdm(range(max_eval_steps), desc="Evaluating", total=max_eval_steps):
+      eval_data = get_data_bert(GPUS, eval_it)
+      eval_result: dict[str, Tensor] = eval_step_bert(model, eval_data["input_ids"], eval_data["segment_ids"], eval_data["input_mask"], \
+                                                eval_data["masked_lm_positions"], eval_data["masked_lm_ids"], \
+                                                eval_data["masked_lm_weights"], eval_data["next_sentence_labels"])
 
-  for _ in tqdm(range(max_eval_steps), desc="Evaluating", total=max_eval_steps):
-    eval_data = get_data_bert(GPUS, eval_it)
-    eval_result: dict[str, Tensor] = eval_step_bert(model, eval_data["input_ids"], eval_data["segment_ids"], eval_data["input_mask"], \
-                                               eval_data["masked_lm_positions"], eval_data["masked_lm_ids"], \
-                                               eval_data["masked_lm_weights"], eval_data["next_sentence_labels"])
+      mlm_accuracy = eval_result["masked_lm_accuracy"].numpy().item()
+      eval_accuracy.append(mlm_accuracy)
 
-    mlm_accuracy = eval_result["masked_lm_accuracy"].numpy().item()
-    eval_accuracy.append(mlm_accuracy)
-
-  total_lm_accuracy = sum(eval_accuracy) / len(eval_accuracy)
-  assert total_lm_accuracy >= 0.34, "Checkpoint loaded incorrectly. Accuracy should be very close to 0.34085 as per MLPerf BERT README."
-  print(f"Checkpoint loaded correctly. Accuracy of {total_lm_accuracy*100:.3f}% achieved. (Reference: 34.085%)")
+    total_lm_accuracy = sum(eval_accuracy) / len(eval_accuracy)
+    assert total_lm_accuracy >= 0.34, "Checkpoint loaded incorrectly. Accuracy should be very close to 0.34085 as per MLPerf BERT README."
+    print(f"Checkpoint loaded correctly. Accuracy of {total_lm_accuracy*100:.3f}% achieved. (Reference: 34.085%)")

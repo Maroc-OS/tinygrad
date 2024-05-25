@@ -497,11 +497,10 @@ class TestMultiTensor(unittest.TestCase):
       t_none.assign(t_zero)
 
   def test_dropout_on_shard(self):
-    Tensor.training = True
-    X = Tensor.ones(256).to(devices_2)
-    output = X.dropout(0.5)
-    output.numpy()
-    Tensor.training = False
+    with Tensor.train():
+      X = Tensor.ones(256).to(devices_2)
+      output = X.dropout(0.5)
+      output.numpy()
 
 @unittest.skipIf(CI and Device.DEFAULT in {"GPU", "CUDA", "METAL"}, "no GPU CI")
 class TestShrinkMultiTensorShardedAxis(unittest.TestCase):

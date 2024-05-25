@@ -105,8 +105,7 @@ class TestTinygrad(unittest.TestCase):
   def test_dropout(self):
     with Tensor.train():
       n, rate = 1_000_000, 0.1
-      dr = Dropout(rate)
-      w = dr(Tensor.ones(n))
+      w = Tensor.ones(n).dropout(rate)
       non_zeros = np.count_nonzero(w.numpy())
       expected = n * (1 - rate)
       np.testing.assert_allclose(non_zeros, expected, rtol=2e-3)

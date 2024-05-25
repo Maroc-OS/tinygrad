@@ -38,10 +38,10 @@ from extra.models.vit import ViT
 @unittest.skipUnless(Device.DEFAULT == "GPU", "Not Implemented")
 class TestInferenceMinKernels(unittest.TestCase):
   def setUp(self):
-    self.training_old = Tensor.training
-    Tensor.training = False
+    self.training_old = Tensor.is_train_enabled
+    Tensor.is_train_enabled = False
   def tearDown(self):
-    Tensor.training = self.training_old
+    Tensor.is_train_enabled = self.training_old
 
   @unittest.skipIf(not PUSH_PERMUTES, "this test requires PUSH_PERMUTES")
   def test_convnext(self):

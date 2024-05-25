@@ -63,40 +63,40 @@ class BenchmarkResnetTrain(unittest.TestCase):
     with Context(SAVE_SCHEDULE=0): Tensor.realize(*[t.assign(t.detach().contiguous()) for t in get_parameters(optim)])
 
     JITCNT = getenv("JITCNT", 1)
-    Tensor.training = True
-    @TinyJit
-    def step(x):
-      optim.zero_grad()
-      x.grad = None
+    with Tensor.train():
+      @TinyJit
+      def step(x:Tensor):
+        optim.zero_grad()
+        x.grad = None
 
-      y = x.sequential(layer).contiguous().contiguous_backward()
-      y.sum().backward()
-      if getenv("ASSIGN", 1): sched, _ = Tensor.schedule_with_vars(y, x.grad, *optim.schedule_step())
-      else: sched, _ = Tensor.schedule_with_vars(y, x.grad, *[t.grad for t in optim.params])
+        y = x.sequential(layer).contiguous().contiguous_backward()
+        y.sum().backward()
+        if getenv("ASSIGN", 1): sched, _ = Tensor.schedule_with_vars(y, x.grad, *optim.schedule_step())
+        else: sched, _ = Tensor.schedule_with_vars(y, x.grad, *[t.grad for t in optim.params])
 
-      for _ in range(JITCNT):
-        run_schedule([si for si in sched])
+        for _ in range(JITCNT):
+          run_schedule([si for si in sched])
 
-    CNT = getenv("CNT", 5)
-    best_tm = None
-    flops, mem_used, mem, kernels = None, None, None, None
-    for i in range(CNT):
-      with Context(SAVE_SCHEDULE=0): x = Tensor.randn(bs, cin, xy, xy, requires_grad=True).realize()
-      GlobalCounters.reset()
+      CNT = getenv("CNT", 5)
+      best_tm = None
+      flops, mem_used, mem, kernels = None, None, None, None
+      for _ in range(CNT):
+        with Context(SAVE_SCHEDULE=0): x = Tensor.randn(bs, cin, xy, xy, requires_grad=True).realize()
+        GlobalCounters.reset()
 
-      st = time.perf_counter()
-      step(x)
-      Device[Device.DEFAULT].synchronize()
-      et = time.perf_counter()
+        st = time.perf_counter()
+        step(x)
+        Device[Device.DEFAULT].synchronize()
+        et = time.perf_counter()
 
-      flops = GlobalCounters.global_ops / JITCNT
-      mem_used = GlobalCounters.mem_used  # a little high with JITCNT > 1 fsr
-      mem = GlobalCounters.global_mem / JITCNT
-      if kernels is None: kernels = GlobalCounters.kernel_count // JITCNT
-      tm = (et-st) / JITCNT
-      if best_tm is None or tm < best_tm: best_tm = tm
-    print(f"\r{name:38s}: {best_tm * 1000:>9.2f} ms, {flops / 10**12 / best_tm:>6.2f} tflops, {mem / 10**9 / best_tm:>5.0f} GB/s, "
-          f"{mem_used / 10**9: 6.2f} GB used, {kernels:>5d} kernels")
+        flops = GlobalCounters.global_ops / JITCNT
+        mem_used = GlobalCounters.mem_used  # a little high with JITCNT > 1 fsr
+        mem = GlobalCounters.global_mem / JITCNT
+        if kernels is None: kernels = GlobalCounters.kernel_count // JITCNT
+        tm = (et-st) / JITCNT
+        if best_tm is None or tm < best_tm: best_tm = tm
+      print(f"\r{name:38s}: {best_tm * 1000:>9.2f} ms, {flops / 10**12 / best_tm:>6.2f} tflops, {mem / 10**9 / best_tm:>5.0f} GB/s, "
+            f"{mem_used / 10**9: 6.2f} GB used, {kernels:>5d} kernels")
     return best_tm, flops, mem, kernels
 
   def test_layer1_1(self): self._est(*self._test_layer(*self._get_layer(0, 0)), 1)

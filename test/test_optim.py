@@ -44,9 +44,9 @@ def step(tensor, optim, steps=1, teeny=False, **kwargs):
 @unittest.skipIf(CI and Device.DEFAULT in {"CUDA", "NV"}, "slow")
 class TestOptim(unittest.TestCase):
   def setUp(self):
-    self.old_training = Tensor.training
-    Tensor.training = True
-  def tearDown(self): Tensor.training = self.old_training
+    self.old_training = Tensor.is_train_enabled
+    Tensor.is_train_enabled = True
+  def tearDown(self): Tensor.is_train_enabled = self.old_training
 
   def _test_optim(self, tinygrad_optim, torch_optim, steps, opts, atol, rtol):
     for x,y in zip(step(Tensor, tinygrad_optim, steps, **opts),
@@ -123,13 +123,13 @@ class TestOptim(unittest.TestCase):
     t = Tensor.ones((1,1), requires_grad=True)
     optimizer = Adam([t])
     optimizer.zero_grad()
-    old_state = Tensor.training
+    old_state = Tensor.is_train_enabled
     t.sum().backward()
-    Tensor.training = False
+    Tensor.is_train_enabled = False
     self.assertRaises(AssertionError, optimizer.step)
-    Tensor.training = True
+    Tensor.is_train_enabled = True
     optimizer.step()
-    Tensor.training = old_state
+    Tensor.is_train_enabled = old_state
 
 if __name__ == '__main__':
   unittest.main()

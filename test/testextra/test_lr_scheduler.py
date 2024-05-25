@@ -54,9 +54,9 @@ def get_lrs(optim, sched, epochs, steps=1, accs=None):
 
 class TestLrScheduler(unittest.TestCase):
   def setUp(self):
-    self.old_training = Tensor.training
-    Tensor.training = True
-  def tearDown(self): Tensor.training = self.old_training
+    self.old_training = Tensor.is_train_enabled
+    Tensor.is_train_enabled = True
+  def tearDown(self): Tensor.is_train_enabled = self.old_training
 
   def _test_lr_scheduler(self, tinygrad_sched, torch_sched, epochs, opts, atol, rtol, adam=True):
     accs = opts.pop('accs', None)

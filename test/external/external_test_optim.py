@@ -102,9 +102,9 @@ def create_tf_polylr(initial_lr, end_lr, train_steps, warmup, power=2, skip_list
 
 class ExternalTestOptim(unittest.TestCase):
   def setUp(self):
-    self.old_training = Tensor.training
-    Tensor.training = True
-  def tearDown(self): Tensor.training = self.old_training
+    self.old_training = Tensor.is_train_enabled
+    Tensor.is_train_enabled = True
+  def tearDown(self): Tensor.is_train_enabled = self.old_training
 
   def _test_optim(self, tinygrad_optim, tensorflow_optim, steps, opts, atol, rtol, tiny_sched=None, tf_sched=None, schedopts=None, do_optim=True):
     for x,y in zip(step(tinygrad_optim, steps=steps, kwargs=opts, scheduler=tiny_sched, schedopts=schedopts, do_optim=do_optim),
