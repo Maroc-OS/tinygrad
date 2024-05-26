@@ -34,9 +34,10 @@ class Function:
     ctx = fxn(x[0].device, *x)
     ret = Tensor.__new__(Tensor)
     ret.lazydata, ret.requires_grad, ret.grad = ctx.forward(*[t.lazydata for t in x], **kwargs), ctx.requires_grad, None
+    # We should not be setting requires_grad on inference tensors outside inference mode
     if ctx.requires_grad and Tensor.inference_tensor:
       raise RuntimeError("Setting requires_grad=True on inference tensor outside InferenceMode is not allowed.")
-    elif ctx.requires_grad and Tensor.is_grad_enabled:
+    elif ctx.requires_grad and Tensor.is_grad_enabled: # used by autograd engine
       Tensor.is_inference_mode_enabled = False
       Tensor.inference_tensor = False
       ret._ctx = ctx
